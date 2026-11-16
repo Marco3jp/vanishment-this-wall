@@ -228,8 +228,8 @@ for (let i = 0; i < tries; i++) {
     if (e?.code !== "EADDRINUSE") fatal(e?.message ?? String(e));
     if (i === tries - 1) {
       fatal(portArg
-        ? `ポート ${firstPort} はほかのソフトが使っています。別の番号を指定してください（例: screencast.exe 9000）`
-        : `ポート ${firstPort}〜${firstPort + tries - 1} がすべて使われています。screencast.exe 9000 のように番号を指定してください`);
+        ? `ポート ${firstPort} はほかのソフトが使っています。別の番号を指定してください（例: vanish.exe 9000）`
+        : `ポート ${firstPort}〜${firstPort + tries - 1} がすべて使われています。vanish.exe 9000 のように番号を指定してください`);
     }
   }
 }

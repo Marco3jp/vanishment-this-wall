@@ -1,10 +1,10 @@
 {
-  "name": "lan-screencast",
+  "name": "vanishment-this-wall",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "bun run server.ts --no-open",
-    "build": "bun build --compile --target=bun-windows-x64 --minify server.ts --outfile dist/screencast.exe",
+    "build": "bun build --compile --target=bun-windows-x64 --minify server.ts --outfile dist/vanish.exe",
     "test": "bun run test/e2e.ts"
   },
   "dependencies": {

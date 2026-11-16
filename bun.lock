@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "lan-screencast",
+      "name": "vanishment-this-wall",
       "dependencies": {
         "qrcode": "^1.5.4",
       },
