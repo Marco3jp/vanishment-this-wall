@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>画面を見る</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:#000; color:#eee; font:15px/1.6 system-ui, -apple-system, "Hiragino Sans", sans-serif; overflow:hidden; }
+  #stage { position:fixed; inset:0; }
+  video { width:100%; height:100%; object-fit:contain; background:#000; display:block; }
+  #delayedVideo { position:absolute; inset:0; display:none; }
+  #status { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; padding:24px; color:#aaa; pointer-events:none; }
+  #status:empty { display:none; }
+  #unmute { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); padding:16px 28px; font:inherit; font-size:18px; font-weight:600;
+            border:0; border-radius:999px; background:rgba(255,255,255,.92); color:#111; display:none; }
+  #bar { position:absolute; left:0; right:0; bottom:0; display:flex; gap:8px; align-items:center; justify-content:flex-end;
+         padding:12px max(16px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+         background:linear-gradient(transparent, rgba(0,0,0,.7)); transition:opacity .25s; }
+  #bar.hidden { opacity:0; pointer-events:none; }
+  #bar button { font:inherit; padding:8px 14px; border-radius:8px; border:1px solid rgba(255,255,255,.3); background:rgba(0,0,0,.4); color:#fff; }
+  #info { margin-right:auto; color:#bbb; font-size:13px; }
+  #dev { position:absolute; left:max(8px, env(safe-area-inset-left)); top:max(8px, env(safe-area-inset-top)); max-width:min(460px, calc(100% - 16px));
+         background:rgba(0,0,0,.72); color:#e6e6e6; border-radius:8px; padding:6px 8px; font:11px/1.45 ui-monospace, Menlo, Consolas, monospace; display:none; }
+  #dev.show { display:block; }
+  #dev pre { margin:0; white-space:pre-wrap; }
+  #dev .bad { color:#fbbf24; }
+  #devClose { position:absolute; right:2px; top:0; border:0; background:none; color:#aaa; font-size:16px; padding:2px 6px; }
+  #settings { position:absolute; right:max(16px, env(safe-area-inset-right)); bottom:calc(64px + env(safe-area-inset-bottom)); width:min(340px, calc(100% - 32px));
+              background:rgba(24,24,28,.96); border:1px solid rgba(255,255,255,.15); border-radius:12px; padding:14px 16px; display:none; gap:14px; font-size:14px; }
+  #settings.open { display:grid; }
+  #settings .title { color:#aaa; font-size:12px; margin-bottom:6px; }
+  #settings .hint { color:#999; font-size:12px; margin-top:4px; }
+  #settings button { font:inherit; padding:6px 14px; border-radius:8px; border:1px solid rgba(255,255,255,.3); background:rgba(255,255,255,.06); color:#fff; }
+  .delay { display:flex; align-items:center; gap:8px; }
+  #delayVal { flex:1; text-align:center; font-variant-numeric:tabular-nums; font-size:16px; }
+  #settings label { display:flex; gap:8px; align-items:flex-start; }
+  #settings input[type=checkbox] { margin-top:4px; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <video id="video" playsinline autoplay muted></video>
+  <video id="delayedVideo" playsinline autoplay muted></video>
+  <div id="status">接続しています…</div>
+  <button id="unmute">タップして音を出す</button>
+  <div id="dev"><button id="devClose" aria-label="開発用の表示を隠す">×</button><pre id="devText"></pre></div>
+  <div id="settings">
+    <div id="delayBox">
+      <div class="title">音のタイミング</div>
+      <div class="delay">
+        <button id="delayMinus" aria-label="音を10ms早める">−</button>
+        <span id="delayVal"></span>
+        <button id="delayPlus" aria-label="音を10ms遅らせる">＋</button>
+      </div>
+      <div class="hint" id="delayHint"></div>
+    </div>
+    <label><input type="checkbox" id="rotateFs"> <span>全画面にしたとき横向きにする<br><span class="hint">端末の向きを固定していても横になります</span></span></label>
+  </div>
+  <div id="bar" class="hidden">
+    <span id="info"></span>
+    <button id="settingsBtn" aria-expanded="false" aria-controls="settings">設定</button>
+    <button id="pipBtn" style="display:none">PiP</button>
+    <button id="muteBtn">消音</button>
+    <button id="fsBtn">全画面</button>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $("video");
+let ws = null;
+let pc = null;
+let wantSound = false;
+let queue = Promise.resolve();
+let retryTimer = null;
+
+// 音と映像のずれは、WebRTC が両者を揃えて出したあとで調整する。
+// WebRTC の受信バッファで片方だけを遅らせても、十数秒かけてもう片方も同じだけ遅らされ、ずれが消えるため。
+// 音を遅らせるときは Web Audio の DelayNode、映像を遅らせる（音を早める）ときはフレームを溜めて canvas に描く
+let ac = null, srcNode = null, srcStream = null, delayNode = null, gainNode = null, analyser = null;
+const DELAY_KEY = "screencast.audioDelayMs";
+const canDelayVideo = typeof MediaStreamTrackProcessor === "function" && typeof createImageBitmap === "function";
+const MIN_DELAY = canDelayVideo ? -300 : 0, MAX_DELAY = 500;
+let audioDelayMs = 0;
+try { audioDelayMs = Math.max(MIN_DELAY, Math.min(MAX_DELAY, Number(localStorage.getItem(DELAY_KEY)) || 0)); } catch {}
+let videoDelay = null;
+const ROTATE_KEY = "screencast.rotateOnFullscreen";
+let rotateOnFullscreen = true;
+try { rotateOnFullscreen = localStorage.getItem(ROTATE_KEY) !== "0"; } catch {}
+$("rotateFs").checked = rotateOnFullscreen;
+
+const setStatus = (s) => { $("status").textContent = s; };
+function wsSend(msg) { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws?role=viewer`);
+  ws.onmessage = (e) => { const msg = JSON.parse(e.data); queue = queue.then(() => handle(msg)).catch(console.error); };
+  ws.onclose = () => {
+    closePc();
+    setStatus("PCとの接続が切れました。つなぎ直しています…");
+    setTimeout(connect, 1500);
+  };
+}
+
+const WAITING = "PCで配信が始まるのを待っています…";
+
+async function handle(msg) {
+  if (msg.type === "hello") {
+    setStatus(msg.live ? "映像を待っています…" : WAITING);
+    // 送る解像度の上限を決めてもらうため、画面の物理ピクセル数を伝える
+    const dpr = window.devicePixelRatio || 1;
+    const w = Math.round(screen.width * dpr), h = Math.round(screen.height * dpr);
+    wsSend({ type: "screen", long: Math.max(w, h), short: Math.min(w, h), detail: { w: screen.width, h: screen.height, dpr } });
+    setDevGlobal(!!msg.dev);
+  } else if (msg.type === "dev") {
+    setDevGlobal(!!msg.on);
+  } else if (msg.type === "sender-offline" || msg.type === "idle") {
+    closePc();
+    setStatus(WAITING);
+  } else if (msg.type === "signal") {
+    if (msg.data.sdp?.type === "offer") await answer(msg.data.sdp);
+    else if (msg.data.candidate && pc) await pc.addIceCandidate(msg.data.candidate).catch(() => {});
+  }
+}
+
+// 受け側の answer で stereo=1 を宣言すると、送り側の Opus がステレオ・高ビットレートで送ってくる
+function preferStereo(sdp) {
+  const pt = sdp.match(/a=rtpmap:(\d+) opus\/48000\/2/i)?.[1];
+  if (!pt) return sdp;
+  return sdp.replace(new RegExp(`a=fmtp:${pt} (.*)`), (line, params) =>
+    /stereo=/.test(params) ? line : `a=fmtp:${pt} ${params};stereo=1;sprop-stereo=1;maxaveragebitrate=256000`);
+}
+
+async function answer(offer) {
+  closePc();
+  const p = new RTCPeerConnection({ iceServers: [] });
+  pc = p;
+  p.onicecandidate = (e) => { if (e.candidate) wsSend({ type: "signal", data: { candidate: e.candidate.toJSON() } }); };
+  p.ontrack = (e) => {
+    if (video.srcObject !== e.streams[0]) video.srcObject = e.streams[0];
+    play();
+  };
+  p.onconnectionstatechange = () => {
+    if (pc !== p) return;
+    const st = p.connectionState;
+    if (st === "connected") { setStatus(""); showBar(); }
+    else if (st === "connecting") setStatus("つないでいます…");
+    else if (st === "failed" || st === "disconnected") {
+      setStatus("映像が途切れました。つなぎ直しています…");
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(() => { if (pc === p && p.connectionState !== "connected") wsSend({ type: "request-offer" }); }, st === "failed" ? 500 : 4000);
+    }
+  };
+  await p.setRemoteDescription(offer);
+  const ans = await p.createAnswer();
+  try {
+    await p.setLocalDescription({ type: "answer", sdp: preferStereo(ans.sdp) });
+  } catch {
+    await p.setLocalDescription(ans);
+  }
+  wsSend({ type: "signal", data: { sdp: p.localDescription.toJSON() } });
+}
+
+function closePc() {
+  clearTimeout(retryTimer);
+  stopVideoDelay();
+  pc?.close();
+  pc = null;
+  video.srcObject = null;
+  $("unmute").style.display = "none";
+  $("info").textContent = "";
+}
+
+// 受信状況をPC側に送る。PCで http://localhost:<port>/api/stats を開くと直近の記録が見られる
+async function collectStats(p) {
+  const all = new Map();
+  (await p.getStats()).forEach((s) => all.set(s.id, s));
+  const out = {
+    ua: navigator.userAgent, visibility: document.visibilityState, paused: video.paused,
+    sound: wantSound, audioDelayMs, videoDelayQueue: videoDelay?.queue.length ?? null,
+    screen: { w: screen.width, h: screen.height, dpr: window.devicePixelRatio || 1 },
+    pip: document.pictureInPictureElement?.id ?? null, fullscreen: !!document.fullscreenElement, orientation: screen.orientation?.type, rotateOnFullscreen, audioContext: ac && { state: ac.state, sampleRate: ac.sampleRate, baseLatency: ac.baseLatency, outputLatency: ac.outputLatency },
+  };
+  for (const s of all.values()) {
+    if (s.type === "inbound-rtp") out[s.kind] = { ...s, codec: all.get(s.codecId) };
+    if (s.type === "transport" && s.selectedCandidatePairId) {
+      const pair = all.get(s.selectedCandidatePairId);
+      out.pair = { ...pair, local: all.get(pair?.localCandidateId), remote: all.get(pair?.remoteCandidateId) };
+    }
+  }
+  return out;
+}
+let lastStats = null, lastStatsAt = 0;
+setInterval(async () => {
+  if (pc?.connectionState !== "connected") return;
+  const data = await collectStats(pc).catch((e) => ({ error: String(e) }));
+  wsSend({ type: "stats", data });
+  const now = performance.now();
+  if (devShown()) renderDevOverlay(data, lastStats, (now - lastStatsAt) / 1000);
+  lastStats = data;
+  lastStatsAt = now;
+}, 2000);
+
+// ---- 開発用の表示 ----
+// 配信ページで開発用モードをオンにするか、URL に ?dev=1 を付けると出る。× でこの端末だけ隠せる
+let devGlobal = false, devDismissed = false;
+const devByUrl = new URLSearchParams(location.search).has("dev");
+const devShown = () => (devGlobal || devByUrl) && !devDismissed;
+function setDevGlobal(on) {
+  if (on && !devGlobal) devDismissed = false;
+  devGlobal = on;
+  $("dev").classList.toggle("show", devShown());
+}
+$("devClose").onclick = (e) => { e.stopPropagation(); devDismissed = true; $("dev").classList.remove("show"); };
+$("dev").classList.toggle("show", devShown());
+
+function renderDevOverlay(c, p, sec) {
+  if (c.error) { $("devText").textContent = c.error; return; }
+  const d = (x, px, k) => (x?.[k] ?? 0) - (px?.[k] ?? 0);
+  const per = (x, px, k, by) => { const b = d(x, px, by); return b > 0 ? d(x, px, k) / b : null; };
+  const n = (v, f = 0) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(f));
+  const v = c.video, pv = p?.video, a = c.audio, pa = p?.audio;
+  const decMs = per(v, pv, "totalDecodeTime", "framesDecoded");
+  const budget = 1000 / Math.max(30, v?.framesPerSecond ?? 60);
+  const bad = (cond, s) => (cond ? `<span class="bad">${s}</span>` : s);
+  const pair = c.pair;
+  const ac = c.audioContext;
+  const lines = [
+    `映像 ${v?.frameWidth ?? "—"}×${v?.frameHeight ?? "—"} ${n(v?.framesPerSecond)}fps  ${n(p && sec > 0 ? (d(v, pv, "bytesReceived") * 8) / sec / 1e6 : null, 1)}Mbps  ${v?.codec?.mimeType ?? ""}`,
+    `デコーダー ${v?.decoderImplementation ?? "—"}${v?.powerEfficientDecoder ? "（HW）" : ""}  ` + bad(decMs != null && decMs * 1000 > budget * 0.8, `${n(decMs == null ? null : decMs * 1000, 1)}ms/枚`),
+    `受信バッファ ${n((per(v, pv, "jitterBufferDelay", "jitterBufferEmittedCount") ?? 0) * 1000)}ms（目標 ${n((per(v, pv, "jitterBufferTargetDelay", "jitterBufferEmittedCount") ?? 0) * 1000)}ms）`,
+    bad(d(v, pv, "framesDropped") > 0 || d(v, pv, "freezeCount") > 0,
+      `取りこぼし +${d(v, pv, "framesDropped")}（${v?.framesDropped ?? 0}）  停止 +${d(v, pv, "freezeCount")}（${v?.freezeCount ?? 0}回 ${n(v?.totalFreezesDuration, 1)}s）`),
+    `欠け ${v?.packetsLost ?? 0}  NACK ${v?.nackCount ?? 0}  PLI ${v?.pliCount ?? 0}  往復 ${n((pair?.currentRoundTripTime ?? 0) * 1000)}ms  ${pair?.remote?.address ?? ""}`,
+    `音 バッファ ${n((per(a, pa, "jitterBufferDelay", "jitterBufferEmittedCount") ?? 0) * 1000)}ms  補い ` +
+      bad((per(a, pa, "concealedSamples", "totalSamplesReceived") ?? 0) > 0.02, `${n((per(a, pa, "concealedSamples", "totalSamplesReceived") ?? 0) * 100, 1)}%`) +
+      `  詰め ${d(a, pa, "removedSamplesForAcceleration")} 伸ばし ${d(a, pa, "insertedSamplesForDeceleration")}`,
+    `音の出力 ${ac ? `${n(ac.outputLatency * 1000)}ms（基本 ${n(ac.baseLatency * 1000)}ms）` : "—"}  音の遅れ ${audioDelayMs}ms${videoDelay ? `  映像の待ち ${videoDelay.queue.length}枚` : ""}`,
+    `画面 ${c.screen.w}×${c.screen.h} ×${c.screen.dpr}  ${c.orientation ?? ""}${c.fullscreen ? " 全画面" : ""}${c.pip ? " PiP" : ""}`,
+  ];
+  $("devText").innerHTML = lines.join("\n");
+}
+
+function hasAudio() { return !!video.srcObject?.getAudioTracks().length; }
+
+function play() {
+  video.muted = true;
+  video.play().catch(() => {});
+  connectAudioSource();
+  syncVideoDelay();
+  updateSoundUi();
+}
+
+// 最初の1回はタップの中で呼ぶ（ブラウザはタップなしに音を出させない）
+function setupAudio() {
+  if (!ac) {
+    ac = new AudioContext();
+    delayNode = ac.createDelay(1);
+    gainNode = ac.createGain();
+    analyser = ac.createAnalyser();
+    delayNode.connect(gainNode).connect(ac.destination);
+    gainNode.connect(analyser);
+  }
+  ac.resume().catch(() => {});
+  connectAudioSource();
+  applyAudio();
+}
+
+function connectAudioSource() {
+  const s = video.srcObject;
+  if (!ac || s === srcStream) return;
+  srcNode?.disconnect();
+  srcNode = null;
+  srcStream = s;
+  if (s?.getAudioTracks().length) {
+    srcNode = ac.createMediaStreamSource(s);
+    srcNode.connect(delayNode);
+  }
+}
+
+function applyAudio() {
+  if (delayNode) delayNode.delayTime.value = Math.max(0, audioDelayMs) / 1000;
+  syncVideoDelay();
+  if (gainNode) gainNode.gain.value = wantSound ? 1 : 0;
+  updateSoundUi();
+}
+
+function updateSoundUi() {
+  $("unmute").style.display = hasAudio() && !ac ? "block" : "none";
+  $("muteBtn").textContent = wantSound ? "消音" : "音を出す";
+  $("muteBtn").style.display = hasAudio() ? "" : "none";
+  $("delayBox").style.display = hasAudio() ? "" : "none";
+  $("delayVal").textContent = `音の遅れ ${audioDelayMs > 0 ? "+" : ""}${audioDelayMs}ms`;
+  $("delayHint").textContent = audioDelayMs < 0 ? `映像を${-audioDelayMs}ms遅らせています`
+    : canDelayVideo ? "＋で音を遅らせ、−で映像を遅らせます" : "＋で音を遅らせます（このブラウザでは映像は遅らせられません）";
+}
+
+$("unmute").onclick = (e) => {
+  e.stopPropagation();
+  wantSound = true;
+  setupAudio();
+  showBar();
+};
+
+$("muteBtn").onclick = (e) => {
+  e.stopPropagation();
+  wantSound = !wantSound;
+  setupAudio();
+  showBar();
+};
+
+// 映像を遅らせる。受け取ったフレームを ImageBitmap に写して溜め、指定時間たったものから
+// MediaStreamTrackGenerator に流して2つ目の video 要素（PiP にも出せる）で映す。
+// VideoFrame のまま溜めるとデコーダーのバッファを抱え込んでデコードが止まるので、写してからすぐ閉じる。
+// 出すタイミングは、次のフレームが届いたときとタイマーで決める。PiP 中は requestAnimationFrame が止まることがあるため
+function syncVideoDelay() {
+  const track = video.srcObject?.getVideoTracks()[0];
+  const want = audioDelayMs < 0 && canDelayVideo && track;
+  if (!want) { stopVideoDelay(); return; }
+  if (videoDelay?.track !== track) startVideoDelay(track);
+}
+
+function startVideoDelay(track) {
+  const wasPip = document.pictureInPictureElement === video;
+  stopVideoDelay();
+  const gen = new MediaStreamTrackGenerator({ kind: "video" });
+  const st = { track, gen, writer: gen.writable.getWriter(), queue: [], stopped: false, timers: new Set() };
+  videoDelay = st;
+  const out = $("delayedVideo");
+  out.srcObject = new MediaStream([gen]);
+  out.play().catch(() => {});
+  out.style.display = "block";
+
+  const flush = () => {
+    if (st.stopped) return;
+    const due = performance.now() + audioDelayMs;
+    let pick = null;
+    while (st.queue.length && st.queue[0].t <= due) { pick?.bmp.close(); pick = st.queue.shift(); }
+    if (!pick) return;
+    try {
+      const f = new VideoFrame(pick.bmp, { timestamp: Math.round(pick.t * 1000) });
+      st.writer.write(f).catch(() => {}).finally(() => f.close());
+    } catch {}
+    pick.bmp.close();
+  };
+
+  const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
+  st.reader = reader;
+  (async () => {
+    while (!st.stopped) {
+      const { value: frame, done } = await reader.read().catch(() => ({ done: true }));
+      if (done) break;
+      // 裏に回っていて映像を見ていない間は溜めない
+      if (document.hidden && !document.pictureInPictureElement) { frame.close(); continue; }
+      const t = performance.now();
+      const bmp = await createImageBitmap(frame).catch(() => null);
+      frame.close();
+      if (!bmp) continue;
+      if (st.stopped) { bmp.close(); break; }
+      st.queue.push({ bmp, t });
+      // 60fpsで300ms遅らせるのに18枚要る。それより多く溜まったら古いものから捨てる
+      while (st.queue.length > 24) st.queue.shift().bmp.close();
+      flush();
+      const id = setTimeout(() => { st.timers.delete(id); flush(); }, Math.max(0, -audioDelayMs));
+      st.timers.add(id);
+    }
+  })();
+  if (wasPip) out.requestPictureInPicture().catch(() => {});
+}
+
+function stopVideoDelay() {
+  const st = videoDelay;
+  if (!st) return;
+  const wasPip = document.pictureInPictureElement === $("delayedVideo");
+  videoDelay = null;
+  st.stopped = true;
+  for (const id of st.timers) clearTimeout(id);
+  st.reader?.cancel().catch(() => {});
+  st.writer.close().catch(() => {});
+  st.gen.stop();
+  for (const q of st.queue) q.bmp.close();
+  const out = $("delayedVideo");
+  out.style.display = "none";
+  out.srcObject = null;
+  if (wasPip && video.srcObject) video.requestPictureInPicture().catch(() => {});
+}
+
+function changeDelay(step) {
+  audioDelayMs = Math.max(MIN_DELAY, Math.min(MAX_DELAY, audioDelayMs + step));
+  try { localStorage.setItem(DELAY_KEY, String(audioDelayMs)); } catch {}
+  applyAudio();
+  showBar();
+}
+$("delayMinus").onclick = (e) => { e.stopPropagation(); changeDelay(-10); };
+$("settings").addEventListener("click", (e) => { e.stopPropagation(); showBar(); });
+$("settingsBtn").onclick = (e) => {
+  e.stopPropagation();
+  const open = $("settings").classList.toggle("open");
+  $("settingsBtn").setAttribute("aria-expanded", String(open));
+  showBar();
+};
+$("rotateFs").onchange = () => {
+  rotateOnFullscreen = $("rotateFs").checked;
+  try { localStorage.setItem(ROTATE_KEY, rotateOnFullscreen ? "1" : "0"); } catch {}
+  if (document.fullscreenElement) applyOrientation();
+};
+
+// 今映している video 要素。音を早めているときは遅らせた映像のほう
+const shownVideo = () => (videoDelay ? $("delayedVideo") : video);
+
+if (document.pictureInPictureEnabled) $("pipBtn").style.display = "";
+$("pipBtn").onclick = async (e) => {
+  e.stopPropagation();
+  try {
+    if (document.pictureInPictureElement) await document.exitPictureInPicture();
+    else await shownVideo().requestPictureInPicture();
+  } catch (err) {
+    setStatus(`PiPにできませんでした: ${err.message}`);
+    setTimeout(() => setStatus(""), 3000);
+  }
+};
+$("delayPlus").onclick = (e) => { e.stopPropagation(); changeDelay(10); };
+
+// テストから音の通り道を確かめるためのもの
+window.screencastAudio = () => {
+  if (!analyser) return { state: "none" };
+  const buf = new Float32Array(analyser.fftSize);
+  analyser.getFloatTimeDomainData(buf);
+  return { state: ac.state, delayMs: delayNode.delayTime.value * 1000, gain: gainNode.gain.value, peak: Math.max(...buf.map(Math.abs)) };
+};
+
+$("fsBtn").onclick = (e) => {
+  e.stopPropagation();
+  if (document.fullscreenElement || document.webkitFullscreenElement) {
+    (document.exitFullscreen ?? document.webkitExitFullscreen).call(document);
+    return;
+  }
+  const stage = $("stage");
+  if (stage.requestFullscreen) stage.requestFullscreen().then(applyOrientation, () => video.webkitEnterFullscreen?.());
+  else if (stage.webkitRequestFullscreen) stage.webkitRequestFullscreen();
+  else video.webkitEnterFullscreen?.();
+};
+
+// 向きの固定は全画面の間だけ効き、全画面をやめるとブラウザが自動で外す。
+// Android の Chrome は "landscape" を SENSOR_LANDSCAPE として扱うので、端末の回転ロックより優先される
+function applyOrientation() {
+  const o = screen.orientation;
+  if (!o?.lock || !document.fullscreenElement) return;
+  const v = shownVideo();
+  if (rotateOnFullscreen && v.videoWidth > v.videoHeight) o.lock("landscape").catch(() => {});
+  else o.unlock?.();
+}
+
+let hideTimer = null;
+function showBar() {
+  $("bar").classList.remove("hidden");
+  clearTimeout(hideTimer);
+  // 設定を開いている間は操作バーを隠さない
+  if (!$("settings").classList.contains("open")) hideTimer = setTimeout(hideBar, 3000);
+}
+function hideBar() {
+  $("bar").classList.add("hidden");
+  $("settings").classList.remove("open");
+  $("settingsBtn").setAttribute("aria-expanded", "false");
+}
+$("stage").addEventListener("click", () => {
+  if ($("bar").classList.contains("hidden")) showBar(); else hideBar();
+});
+
+video.addEventListener("resize", () => {
+  if (document.fullscreenElement) applyOrientation();
+  if (video.videoWidth) $("info").textContent = `${video.videoWidth}×${video.videoHeight}`;
+});
+
+// スリープから戻ったときに映像が止まっていたら、送り直してもらう
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible") return;
+  if (ac && ac.state !== "running") ac.resume().catch(() => {});
+  if (ws?.readyState !== 1) return;
+  if (pc && pc.connectionState !== "connected") wsSend({ type: "request-offer" });
+  else if (video.paused && video.srcObject) play();
+});
+
+connect();
+</script>
+</body>
+</html>

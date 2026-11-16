@@ -1,0 +1,620 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>画面配信</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --fg:#1d2128; --mute:#6b7280; --line:#e3e6eb; --accent:#2563eb; --ok:#16a34a; --warn:#b45309; --warnbg:#fef3c7; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#14161a; --card:#1d2026; --fg:#e8eaee; --mute:#9aa1ad; --line:#2d3139; --accent:#60a5fa; --ok:#4ade80; --warn:#fbbf24; --warnbg:#3a2e10; } }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.6 system-ui, "Segoe UI", "Yu Gothic UI", sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 48px; display:grid; gap:16px; }
+  h1 { font-size: 20px; margin: 0; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  button { font:inherit; padding:10px 16px; border-radius:8px; border:1px solid var(--line); background:var(--card); color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; font-weight:600; }
+  button:disabled { opacity:.45; cursor:default; }
+  label { display:inline-flex; gap:6px; align-items:center; color:var(--fg); }
+  select { font:inherit; padding:6px 8px; border-radius:6px; border:1px solid var(--line); background:var(--card); color:var(--fg); }
+  .status { display:flex; gap:12px; align-items:center; font-weight:600; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--mute); }
+  .dot.live { background:var(--ok); box-shadow:0 0 0 4px color-mix(in srgb, var(--ok) 25%, transparent); }
+  .sub { color:var(--mute); font-size:13px; font-weight:400; }
+  .warn { background:var(--warnbg); color:var(--warn); border-radius:8px; padding:10px 12px; }
+  .warn:empty { display:none; }
+  video { width:100%; max-height:300px; background:#000; border-radius:8px; display:block; }
+  .urls { display:flex; gap:16px; flex-wrap:wrap; }
+  .url { display:grid; gap:6px; justify-items:center; }
+  .url svg { width:160px; height:160px; background:#fff; border-radius:8px; }
+  .url code { font-size:14px; user-select:all; }
+  ul.peers { margin:8px 0 0; padding-left:20px; color:var(--mute); font-size:13px; }
+  dl.live { display:grid; grid-template-columns:max-content 1fr; gap:4px 16px; margin:12px 0 0; font-size:14px; }
+  dl.live:empty { display:none; }
+  dl.live dt { color:var(--mute); }
+  dl.live dd { margin:0; font-variant-numeric: tabular-nums; }
+  .help { position:relative; display:inline-flex; }
+  .help button { width:22px; height:22px; padding:0; border-radius:50%; font-size:13px; font-weight:700; line-height:1; color:var(--mute); }
+  .help .tip { position:absolute; right:0; top:calc(100% + 8px); width:min(340px, calc(100vw - 32px)); z-index:10;
+               background:var(--fg); color:var(--bg); font-size:13px; line-height:1.6; padding:10px 12px; border-radius:8px;
+               box-shadow:0 4px 16px rgba(0,0,0,.2); visibility:hidden; opacity:0; transition:opacity .12s; }
+  .help:hover .tip, .help:focus-within .tip { visibility:visible; opacity:1; }
+  .dev h2 { font-size:15px; margin:0 0 8px; }
+  .dev h3 { font-size:13px; margin:14px 0 6px; color:var(--mute); font-weight:600; }
+  .dev table { border-collapse:collapse; width:100%; font-size:12px; font-variant-numeric:tabular-nums; }
+  .dev th, .dev td { text-align:left; padding:3px 8px; border-bottom:1px solid var(--line); vertical-align:top; }
+  .dev th { color:var(--mute); font-weight:500; white-space:nowrap; width:1%; }
+  .dev td code, .dev pre { font-family:ui-monospace, "Cascadia Mono", Consolas, monospace; font-size:12px; }
+  .dev .cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
+  @media (max-width: 720px) { .dev .cols { grid-template-columns:1fr; } }
+  .dev .peer { border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-top:10px; }
+  .dev pre { margin:0; max-height:260px; overflow:auto; white-space:pre-wrap; word-break:break-all; background:var(--bg); padding:8px; border-radius:6px; }
+  .dev .bad { color:var(--warn); font-weight:600; }
+  .note { color:var(--warn); font-size:13px; }
+  .note:empty { display:none; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>画面配信</h1>
+
+  <div class="warn" id="fatal"></div>
+
+  <div class="card">
+    <div class="status"><span class="dot" id="dot"></span><span id="state">停止中</span><span class="sub" id="viewerCount"></span></div>
+    <dl class="live" id="live"></dl>
+    <ul class="peers" id="peers"></ul>
+  </div>
+
+  <div class="grid">
+    <div class="card" style="display:grid; gap:12px">
+      <div class="row">
+        <button class="primary" id="startBtn">画面・タブを選んで配信</button>
+        <button id="stopBtn" disabled>停止</button>
+      </div>
+      <div class="row">
+        <label>フレームレート
+          <select id="fps"><option value="30">30fps</option><option value="60" selected>60fps</option></select>
+        </label>
+        <label>解像度
+          <select id="res">
+            <option value="auto" selected>視聴端末に合わせる</option>
+            <option value="1080">1080pまで</option>
+            <option value="720">720pまで</option>
+          </select>
+        </label>
+        <label>画質
+          <select id="bitrate">
+            <option value="3000000">軽め（3Mbps）</option>
+            <option value="8000000">標準（8Mbps）</option>
+            <option value="15000000" selected>高画質（15Mbps）</option>
+          </select>
+        </label>
+      </div>
+      <div class="row" style="gap:6px; flex-wrap:nowrap; align-items:flex-start">
+        <label style="align-items:flex-start"><input type="checkbox" id="muteLocal" checked style="margin-top:5px"> <span>タブを共有したとき、PCではそのタブの音を鳴らさない</span></label>
+        <span class="help">
+          <button type="button" aria-label="音の送り方の説明" aria-describedby="muteTip">?</button>
+          <span class="tip" role="tooltip" id="muteTip">
+            音も送るには、共有するものを選ぶ画面で「タブの音声も共有する」か「システム音声も共有する」をオンにしてください。<br>
+            このチェックが使われるのはタブを共有したときだけで、共有を始めた時点の状態で決まります。配信中に変えたときは、共有し直すと反映されます。<br>
+            タブを共有すると、あとからChrome上部の「このタブを代わりに共有」で切り替えられます（スマホ側はつながったまま）。
+          </span>
+        </span>
+      </div>
+      <div class="note" id="muteNote"></div>
+      <div class="warn" id="warn"></div>
+      <div class="row"><button id="testBtn">テスト映像を送る</button><span class="sub">時計と1秒ごとの「ピッ」音。スマホ側の映り方と音の確認用</span></div>
+    </div>
+
+    <div class="card">
+      <div style="font-weight:600; margin-bottom:8px">スマホ・タブレットで開くURL</div>
+      <div class="urls" id="urls"><span class="sub">読み込み中…</span></div>
+      <div class="sub" style="margin-top:8px">同じWi-Fiにつないだ端末のカメラでQRコードを読んでください。</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="sub" style="margin-bottom:6px">送っている映像</div>
+    <video id="preview" muted playsinline autoplay></video>
+  </div>
+
+  <div class="card dev">
+    <label><input type="checkbox" id="devToggle"> 開発用モード（圧縮・デコードなどの数字を出す。視聴ページにも表示する）</label>
+    <div id="devPanel" style="display:none"></div>
+  </div>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let ws = null;
+let stream = null;
+let testCleanup = null;
+let lockedSize = null;
+let lockAspect = null;
+let sourceSize = null;
+// 視聴端末の画面の物理ピクセル数（横向きにしたときの長辺・短辺）
+const viewerScreens = new Map();
+const viewers = new Set();
+const peers = new Map();
+let queue = Promise.resolve();
+
+if (!window.isSecureContext || !navigator.mediaDevices?.getDisplayMedia) {
+  $("fatal").textContent = `このURLでは画面を取り込めません。このPCのChrome/Edgeで http://localhost:${location.port}/send を開いてください。`;
+}
+
+function wsSend(msg) { if (ws?.readyState === 1) ws.send(JSON.stringify(msg)); }
+
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws?role=sender`);
+  ws.onmessage = (e) => { const msg = JSON.parse(e.data); queue = queue.then(() => handle(msg)).catch(console.error); };
+  ws.onclose = (e) => {
+    closeAllPeers(); viewers.clear(); render();
+    if (e.code === 4001) { $("fatal").textContent = "別のタブで配信ページが開かれたので、こちらは止めました。"; return; }
+    if (e.code === 4003) { $("fatal").textContent = `配信はこのPCからしかできません。http://localhost:${location.port}/send を開いてください。`; return; }
+    setTimeout(connect, 1000);
+  };
+}
+
+async function handle(msg) {
+  if (msg.type === "hello") {
+    viewers.clear();
+    viewerScreens.clear();
+    for (const id of msg.viewers) viewers.add(id);
+    for (const [id, sc] of Object.entries(msg.screens ?? {})) viewerScreens.set(id, sc);
+    for (const [id, inf] of Object.entries(msg.info ?? {})) viewerInfo.set(id, inf);
+    if (msg.dev && !devOn) setDevUi(true);
+    if (devOn) wsSend({ type: "dev", on: true });
+    await updateResolutionCap();
+    if (stream) for (const id of viewers) await startPeer(id);
+  } else if (msg.type === "viewer-join") {
+    viewers.add(msg.id);
+    if (msg.info) viewerInfo.set(msg.id, msg.info);
+    if (stream) await startPeer(msg.id);
+  } else if (msg.type === "viewer-stats") {
+    const prev = viewerStats.get(msg.id);
+    viewerStats.set(msg.id, { prev: prev?.cur, cur: msg.data, at: performance.now(), prevAt: prev?.at });
+    return;
+  } else if (msg.type === "viewer-screen") {
+    viewerScreens.set(msg.id, msg.screen);
+    await updateResolutionCap();
+  } else if (msg.type === "viewer-leave") {
+    viewers.delete(msg.id);
+    viewerScreens.delete(msg.id);
+    viewerInfo.delete(msg.id);
+    viewerStats.delete(msg.id);
+    closePeer(msg.id);
+    await updateResolutionCap();
+  } else if (msg.type === "signal") {
+    const pc = peers.get(msg.from);
+    if (!pc) return;
+    if (msg.data.sdp) await pc.setRemoteDescription(msg.data.sdp);
+    else if (msg.data.candidate) await pc.addIceCandidate(msg.data.candidate).catch(() => {});
+  }
+  render();
+}
+
+async function startPeer(id) {
+  closePeer(id);
+  const pc = new RTCPeerConnection({ iceServers: [] });
+  peers.set(id, pc);
+  for (const t of stream.getTracks()) pc.addTrack(t, stream);
+  pc.onicecandidate = (e) => { if (e.candidate) wsSend({ type: "signal", to: id, data: { candidate: e.candidate.toJSON() } }); };
+  pc.onconnectionstatechange = () => {
+    devEvent("peer", `視聴端末 ${id} との接続: ${pc.connectionState}`);
+    render();
+  };
+  await pc.setLocalDescription(await pc.createOffer());
+  wsSend({ type: "signal", to: id, data: { sdp: pc.localDescription.toJSON() } });
+  await applyEncoding(pc);
+}
+
+async function applyEncoding(pc) {
+  const fps = Number($("fps").value);
+  const maxBitrate = Number($("bitrate").value);
+  for (const s of pc.getSenders()) {
+    if (s.track?.kind !== "video") continue;
+    const p = s.getParameters();
+    if (!p.encodings?.length) p.encodings = [{}];
+    p.encodings[0].maxBitrate = maxBitrate;
+    p.encodings[0].maxFramerate = fps;
+    // 帯域が足りないとき、WebRTC は解像度を下げるよう取り込み側にも求め、画面共有だとそのまま戻らないことがある。
+    // LAN では帯域はすぐ足りるので、足りない間はフレームレートを下げてもらう
+    p.degradationPreference = "maintain-resolution";
+    await s.setParameters(p).catch(console.warn);
+  }
+}
+
+function closePeer(id) { peers.get(id)?.close(); peers.delete(id); }
+function closeAllPeers() { for (const id of [...peers.keys()]) closePeer(id); }
+
+async function startStream(newStream) {
+  stopStream(false);
+  stream = newStream;
+  const v = stream.getVideoTracks()[0];
+  if (v) {
+    v.contentHint = "motion";
+    v.addEventListener("ended", () => stopStream(true));
+  }
+  $("warn").textContent = stream.getAudioTracks().length ? "" :
+    "音が入っていません。音も送るなら、いったん停止して、共有するものを選ぶ画面で音声共有のスイッチをオンにしてください。";
+  $("preview").srcObject = stream;
+  for (const id of viewers) await startPeer(id);
+  render();
+}
+
+// 取り込むサイズの上限を決める。Chrome の画面共有は getDisplayMedia に min/exact を渡せず、
+// applyConstraints でも上限しか変わらないので、解像度は固定できない。実際の大きさは、元のタブを一定の刻みで縮めた候補のうち上限以下で最大のものになる。
+// 上限は、つないでいる端末のうち一番大きい画面に、共有を始めた時点の縦横比で収まるサイズにする。
+// 共有直後の getSettings() は 432x216 のような縮んだサイズを返すことがあるので、縦横比だけを使う
+function capBox() {
+  const mode = $("res").value;
+  if (mode === "720") return { w: 1280, h: 720 };
+  if (mode === "1080") return { w: 1920, h: 1080 };
+  // 端末が1台もいなければ決めない（次につないだ端末で決める）
+  if (!viewerScreens.size) return null;
+  let w = 1280, h = 720;
+  for (const sc of viewerScreens.values()) { w = Math.max(w, sc.long); h = Math.max(h, sc.short); }
+  return { w: Math.min(w, 3840), h: Math.min(h, 2160) };
+}
+
+// 上限を変えるたびに Chrome は取り込みを始め直し、一瞬映像が途切れる。
+// スマホはスリープから戻るときに一度切れてつなぎ直すので、下げるのは少し待ってから決め直す
+const SHRINK_WAIT_MS = 10000;
+let shrinkTimer = null;
+
+function videoConstraints() {
+  const fps = Number($("fps").value);
+  return {
+    width: { exact: lockedSize.width }, height: { exact: lockedSize.height },
+    frameRate: { ideal: fps, max: fps },
+  };
+}
+
+async function lockResolution(track) {
+  lockedSize = null;
+  const { width, height } = track.getSettings();
+  if (!width || !height) return;
+  lockAspect = width / height;
+  await applyCap(track);
+}
+
+async function applyCap(track, allowShrink = true) {
+  const box = capBox() ?? (lockedSize ? null : { w: 1920, h: 1080 });
+  if (!box) return;
+  const scale = Math.min(box.w / lockAspect, box.h);
+  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+  const next = { width: even(scale * lockAspect), height: even(scale) };
+  if (lockedSize && next.width === lockedSize.width && next.height === lockedSize.height) return;
+  if (lockedSize && !allowShrink && next.width * next.height < lockedSize.width * lockedSize.height) {
+    shrinkTimer ??= setTimeout(() => {
+      shrinkTimer = null;
+      queue = queue.then(() => updateResolutionCap(true)).catch(console.error);
+    }, SHRINK_WAIT_MS);
+    return;
+  }
+  clearTimeout(shrinkTimer);
+  shrinkTimer = null;
+  const prev = lockedSize;
+  lockedSize = next;
+  const why = { mode: $("res").value, aspect: lockAspect, box, screens: Object.fromEntries(viewerScreens) };
+  await track.applyConstraints(videoConstraints()).then(
+    () => devEvent("cap", `取り込みの上限を ${next.width}×${next.height} にしました（前: ${prev ? `${prev.width}×${prev.height}` : "なし"}）`, why),
+    (e) => { console.warn(e); lockedSize = prev; devEvent("cap", `取り込みの上限を ${next.width}×${next.height} にできませんでした: ${e.message}`, why); });
+  render();
+}
+
+async function updateResolutionCap(allowShrink = false) {
+  const v = stream?.getVideoTracks()[0];
+  if (v && lockAspect) await applyCap(v, allowShrink);
+}
+
+function stopStream(notify) {
+  if (!stream) return;
+  for (const t of stream.getTracks()) t.stop();
+  stream = null;
+  testCleanup?.(); testCleanup = null;
+  closeAllPeers();
+  $("preview").srcObject = null;
+  $("warn").textContent = "";
+  lockedSize = null;
+  lockAspect = null;
+  sourceSize = null;
+  clearTimeout(shrinkTimer);
+  shrinkTimer = null;
+  if (notify) wsSend({ type: "idle" });
+  render();
+}
+
+$("startBtn").onclick = async () => {
+  const fps = Number($("fps").value);
+  try {
+    const s = await navigator.mediaDevices.getDisplayMedia({
+      video: { frameRate: { ideal: fps, max: fps } },
+      audio: {
+        echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+        channelCount: 2, suppressLocalAudioPlayback: $("muteLocal").checked,
+      },
+      systemAudio: "include",
+      surfaceSwitching: "include",
+      selfBrowserSurface: "exclude",
+    });
+    queue = queue.then(async () => { await lockResolution(s.getVideoTracks()[0]); await startStream(s); }).catch(console.error);
+  } catch (e) {
+    if (e.name !== "NotAllowedError") $("warn").textContent = `画面を取り込めませんでした: ${e.message}`;
+  }
+};
+
+$("stopBtn").onclick = () => stopStream(true);
+$("res").onchange = () => { queue = queue.then(() => updateResolutionCap(true)).catch(console.error); };
+$("muteLocal").onchange = renderLive;
+$("bitrate").onchange = () => { for (const pc of peers.values()) applyEncoding(pc); render(); };
+$("fps").onchange = () => {
+  const fps = Number($("fps").value);
+  const v = stream?.getVideoTracks()[0];
+  if (v && lockedSize) v.applyConstraints(videoConstraints()).catch(() => {});
+  for (const pc of peers.values()) applyEncoding(pc);
+  render();
+};
+
+$("testBtn").onclick = () => {
+  const canvas = document.createElement("canvas");
+  canvas.width = 1280; canvas.height = 720;
+  const g = canvas.getContext("2d");
+  const ac = new AudioContext();
+  const dest = ac.createMediaStreamDestination();
+  // 音を鳴らすたびに発振器を作ると、鳴っていない間は音のデータ自体が流れず、受け側が穴埋めで音を崩す。
+  // 発振器はずっと動かしておき、音量だけを上げ下げする
+  const osc = ac.createOscillator();
+  const gain = ac.createGain();
+  osc.frequency.value = 880;
+  gain.gain.value = 0;
+  osc.connect(gain).connect(dest);
+  osc.start();
+  const start = performance.now();
+  let lastBeep = -1;
+  const timer = setInterval(() => {
+    const t = (performance.now() - start) / 1000;
+    g.fillStyle = "#111"; g.fillRect(0, 0, 1280, 720);
+    const x = (t * 300) % 1280;
+    g.fillStyle = "#2563eb"; g.fillRect(x, 0, 60, 720);
+    const flash = t % 1 < 0.1;
+    g.fillStyle = flash ? "#facc15" : "#fff";
+    g.font = "bold 120px system-ui"; g.textAlign = "center";
+    g.fillText(new Date().toLocaleTimeString("ja-JP", { hour12: false }), 640, 330);
+    g.font = "48px system-ui";
+    g.fillText("テスト映像（黄色に光る瞬間に音が鳴る）", 640, 440);
+    const sec = Math.floor(t);
+    if (sec !== lastBeep) {
+      lastBeep = sec;
+      gain.gain.setValueAtTime(0.3, ac.currentTime);
+      gain.gain.setValueAtTime(0, ac.currentTime + 0.1);
+    }
+  }, 1000 / 30);
+  const s = new MediaStream([...canvas.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+  queue = queue.then(async () => { await startStream(s); testCleanup = () => { clearInterval(timer); ac.close(); }; }).catch(console.error);
+};
+
+// 端末ごとの送信状況。2秒ごとに getStats() から作り、画面の表示とサーバーへの記録に使う
+const peerInfo = new Map();
+let sourceFps = null;
+
+setInterval(async () => {
+  if (!stream) return;
+  const data = { visibility: document.visibilityState, audioSettings: stream.getAudioTracks()[0]?.getSettings(), peers: {} };
+  sourceFps = null;
+  for (const [id, pc] of peers) {
+    const list = [];
+    (await pc.getStats()).forEach((s) => {
+      if (["outbound-rtp", "remote-inbound-rtp", "media-source", "codec", "transport"].includes(s.type)) list.push(s);
+      else if (s.type === "candidate-pair" || s.type === "local-candidate" || s.type === "remote-candidate") list.push(s);
+    });
+    data.peers[id] = list;
+    const old = peerRaw.get(id);
+    peerRaw.set(id, { prev: old?.cur, prevAt: old?.at, cur: list, at: performance.now() });
+
+    const prev = peerInfo.get(id);
+    const out = list.filter((x) => x.type === "outbound-rtp");
+    const video = out.find((x) => x.kind === "video");
+    const bytes = out.reduce((n, x) => n + (x.bytesSent ?? 0), 0);
+    const now = performance.now();
+    const mbps = prev ? ((bytes - prev.bytes) * 8) / ((now - prev.at) * 1000) : null;
+    peerInfo.set(id, { bytes, at: now, mbps, w: video?.frameWidth, h: video?.frameHeight, fps: video?.framesPerSecond, limit: video?.qualityLimitationReason });
+    const ms = list.find((x) => x.type === "media-source" && x.kind === "video");
+    sourceFps ??= ms?.framesPerSecond ?? null;
+    if (ms?.width) sourceSize = { width: ms.width, height: ms.height };
+  }
+  for (const id of [...peerInfo.keys()]) if (!peers.has(id)) peerInfo.delete(id);
+  for (const id of [...peerRaw.keys()]) if (!peers.has(id)) peerRaw.delete(id);
+  data.cap = { mode: $("res").value, aspect: lockAspect, lockedSize, box: lockAspect ? capBox() : null, screens: Object.fromEntries(viewerScreens), sourceSize };
+  if (peers.size) wsSend({ type: "stats", data });
+  render();
+  if (devOn) renderDev();
+}, 2000);
+
+// ---- 開発用モード ----
+const viewerInfo = new Map();   // id -> { ip, ua }
+const viewerStats = new Map();  // id -> { prev, cur, at, prevAt }（視聴ページが送ってくる受信状況）
+const peerRaw = new Map();      // id -> { prev, cur, at, prevAt }（このページの getStats の結果）
+let devOn = false;
+let serverEvents = [];
+try { devOn = localStorage.getItem("screencast.dev") === "1"; } catch {}
+
+function devEvent(kind, text, data) {
+  wsSend({ type: "event", kind, text, data });
+}
+
+function setDevUi(on) {
+  devOn = on;
+  $("devToggle").checked = on;
+  $("devPanel").style.display = on ? "" : "none";
+  try { localStorage.setItem("screencast.dev", on ? "1" : "0"); } catch {}
+  if (on) renderDev();
+}
+$("devToggle").onchange = () => {
+  setDevUi($("devToggle").checked);
+  wsSend({ type: "dev", on: devOn });
+};
+setDevUi(devOn);
+
+setInterval(async () => {
+  if (!devOn) return;
+  try { serverEvents = (await (await fetch("/api/debug")).json()).events ?? []; } catch {}
+}, 2000);
+
+const esc = (v) => String(v ?? "—").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+const num = (v, d = 0) => (v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
+const find = (list, type, kind) => list?.find((x) => x.type === type && (!kind || x.kind === kind));
+const delta = (cur, prev, k) => (cur?.[k] ?? 0) - (prev?.[k] ?? 0);
+const per = (cur, prev, k, by) => { const b = delta(cur, prev, by); return b > 0 ? delta(cur, prev, k) / b : null; };
+const rate = (cur, prev, k, sec) => (prev && sec > 0 ? (delta(cur, prev, k) * 8) / sec / 1e6 : null);
+
+function senderRows(id) {
+  const r = peerRaw.get(id);
+  if (!r) return [["状態", "まだ数字がありません"]];
+  const { cur, prev } = r;
+  const sec = r.prevAt ? (r.at - r.prevAt) / 1000 : 0;
+  const v = find(cur, "outbound-rtp", "video"), pv = find(prev, "outbound-rtp", "video");
+  const a = find(cur, "outbound-rtp", "audio"), pa = find(prev, "outbound-rtp", "audio");
+  const ms = find(cur, "media-source", "video");
+  const ri = find(cur, "remote-inbound-rtp", "video");
+  const codec = cur.find((x) => x.id === v?.codecId);
+  const tr = find(cur, "transport");
+  const pair = cur.find((x) => x.id === tr?.selectedCandidatePairId);
+  const lc = cur.find((x) => x.id === pair?.localCandidateId), rc = cur.find((x) => x.id === pair?.remoteCandidateId);
+  const qd = v?.qualityLimitationDurations ?? {};
+  const encMs = per(v, pv, "totalEncodeTime", "framesEncoded");
+  return [
+    ["接続", `${esc(peers.get(id)?.connectionState)}　${esc(lc?.candidateType)} ${esc(lc?.address)} → ${esc(rc?.candidateType)} ${esc(rc?.address)}:${esc(rc?.port)}`],
+    ["往復の遅れ", `${num((pair?.currentRoundTripTime ?? 0) * 1000)}ms（端末からの報告 ${num((ri?.roundTripTime ?? 0) * 1000)}ms）`],
+    ["送れる帯域の見積もり", `${num((pair?.availableOutgoingBitrate ?? 0) / 1e6, 1)}Mbps`],
+    ["コーデック", `${esc(codec?.mimeType)} ${esc(codec?.sdpFmtpLine ?? "")}`],
+    ["エンコーダー", `${esc(v?.encoderImplementation)}${v?.powerEfficientEncoder ? "（ハードウェア）" : ""}`],
+    ["取り込み", `${esc(ms?.width)}×${esc(ms?.height)} ${num(ms?.framesPerSecond)}fps`],
+    ["送信", `${esc(v?.frameWidth)}×${esc(v?.frameHeight)} ${num(v?.framesPerSecond)}fps`],
+    ["ビットレート", `目標 ${num((v?.targetBitrate ?? 0) / 1e6, 1)}Mbps　実際 ${num(rate(v, pv, "bytesSent", sec), 1)}Mbps`],
+    ["圧縮", `<span class="${encMs != null && encMs * 1000 > (1000 / Number($("fps").value)) * 0.8 ? "bad" : ""}">${num(encMs == null ? null : encMs * 1000, 1)}ms/フレーム</span>　QP平均 ${num(per(v, pv, "qpSum", "framesEncoded"), 1)}　キーフレーム ${esc(v?.keyFramesEncoded)}`],
+    ["制限", `<span class="${v?.qualityLimitationReason && v.qualityLimitationReason !== "none" ? "bad" : ""}">${esc(v?.qualityLimitationReason)}</span>　帯域 ${num(qd.bandwidth)}s・CPU ${num(qd.cpu)}s　解像度の変更 ${esc(v?.qualityLimitationResolutionChanges)}回`],
+    ["再送の要求", `NACK ${esc(v?.nackCount)}　PLI ${esc(v?.pliCount)}　FIR ${esc(v?.firCount)}　再送 ${num((v?.retransmittedBytesSent ?? 0) / 1e6, 1)}MB`],
+    ["端末からの報告", `欠け率 ${num((ri?.fractionLost ?? 0) * 100, 1)}%　ジッター ${num((ri?.jitter ?? 0) * 1000)}ms`],
+    ["音", `目標 ${num((a?.targetBitrate ?? 0) / 1000)}kbps　実際 ${num((rate(a, pa, "bytesSent", sec) ?? 0) * 1000)}kbps`],
+  ];
+}
+
+function viewerRows(id) {
+  const r = viewerStats.get(id);
+  if (!r?.cur) return [["状態", "まだ数字がありません"]];
+  const c = r.cur, p = r.prev;
+  const sec = r.prevAt ? (r.at - r.prevAt) / 1000 : 0;
+  const v = c.video, pv = p?.video, a = c.audio, pa = p?.audio;
+  const decMs = per(v, pv, "totalDecodeTime", "framesDecoded");
+  const jb = per(v, pv, "jitterBufferDelay", "jitterBufferEmittedCount");
+  const jbT = per(v, pv, "jitterBufferTargetDelay", "jitterBufferEmittedCount");
+  const ajb = per(a, pa, "jitterBufferDelay", "jitterBufferEmittedCount");
+  const conceal = per(a, pa, "concealedSamples", "totalSamplesReceived");
+  const ac = c.audioContext;
+  const sc = viewerScreens.get(id);
+  return [
+    ["端末", `${esc(viewerInfo.get(id)?.ip)}　画面 ${sc ? `${sc.long}×${sc.short}` : "—"}${c.screen ? `（${c.screen.w}×${c.screen.h} ×${c.screen.dpr}）` : ""}`],
+    ["ブラウザ", `<code>${esc((c.ua ?? viewerInfo.get(id)?.ua ?? "").replace(/^Mozilla\/5\.0 /, ""))}</code>`],
+    ["表示", `${esc(c.visibility)}${c.fullscreen ? "・全画面" : ""}${c.pip ? `・PiP(${esc(c.pip)})` : ""}　${esc(c.orientation)}`],
+    ["デコーダー", `${esc(v?.decoderImplementation)}${v?.powerEfficientDecoder ? "（ハードウェア）" : ""}`],
+    ["受信", `${esc(v?.frameWidth)}×${esc(v?.frameHeight)} ${num(v?.framesPerSecond)}fps　${num(rate(v, pv, "bytesReceived", sec), 1)}Mbps`],
+    ["デコード", `<span class="${decMs != null && decMs * 1000 > (1000 / Math.max(30, v?.framesPerSecond ?? 60)) * 0.8 ? "bad" : ""}">${num(decMs == null ? null : decMs * 1000, 1)}ms/フレーム</span>`],
+    ["受信バッファ", `${num(jb == null ? null : jb * 1000)}ms（目標 ${num(jbT == null ? null : jbT * 1000)}ms）`],
+    ["取りこぼし・停止", `<span class="${delta(v, pv, "framesDropped") > 0 || delta(v, pv, "freezeCount") > 0 ? "bad" : ""}">取りこぼし +${delta(v, pv, "framesDropped")}（累計 ${esc(v?.framesDropped)}）　停止 +${delta(v, pv, "freezeCount")}（累計 ${esc(v?.freezeCount)}回・${num(v?.totalFreezesDuration, 1)}s）</span>`],
+    ["欠け・再送要求", `欠け ${esc(v?.packetsLost)}　NACK ${esc(v?.nackCount)}　PLI ${esc(v?.pliCount)}`],
+    ["音の受信", `バッファ ${num(ajb == null ? null : ajb * 1000)}ms　補い ${num(conceal == null ? null : conceal * 100, 1)}%　詰め ${delta(a, pa, "removedSamplesForAcceleration")}・伸ばし ${delta(a, pa, "insertedSamplesForDeceleration")}サンプル`],
+    ["音の出力", ac ? `出力の遅れ ${num(ac.outputLatency * 1000)}ms（基本 ${num(ac.baseLatency * 1000)}ms）　${esc(ac.state)}` : "まだ音を出していません"],
+    ["ずれの調整", `音の遅れ ${esc(c.audioDelayMs)}ms${c.videoDelayQueue != null ? `　映像の待ち ${c.videoDelayQueue}枚` : ""}`],
+  ];
+}
+
+const table = (rows) => `<table>${rows.map(([k, v]) => `<tr><th>${k}</th><td>${v}</td></tr>`).join("")}</table>`;
+
+function renderDev() {
+  if (!devOn) return;
+  const capRows = [
+    ["解像度の設定", esc($("res").selectedOptions[0]?.textContent)],
+    ["縦横比", lockAspect ? num(lockAspect, 3) : "—（共有していない）"],
+    ["端末の画面", viewerScreens.size ? [...viewerScreens].map(([id, sc]) => `${id}: ${sc.long}×${sc.short}`).join("　") : "—"],
+    ["計算した枠", (() => { const b = lockAspect ? capBox() : null; return b ? `${b.w}×${b.h}` : "—"; })()],
+    ["上限", lockedSize ? `${lockedSize.width}×${lockedSize.height}` : "—"],
+    ["取り込み中", sourceSize ? `${sourceSize.width}×${sourceSize.height}` : "—"],
+    // 取り込みは共有元の実際のピクセル数より大きくならない。共有元がこのページと同じ画面にあれば目安になる
+    ["このPCの画面", `${Math.round(screen.width * devicePixelRatio)}×${Math.round(screen.height * devicePixelRatio)}（${screen.width}×${screen.height} ×${devicePixelRatio}）`],
+  ];
+  const peersHtml = [...viewers].map((id) => `
+    <div class="peer"><b>${esc(id)}</b>
+      <div class="cols"><div><h3>送信（このPC）</h3>${table(senderRows(id))}</div><div><h3>受信（端末）</h3>${table(viewerRows(id))}</div></div>
+    </div>`).join("") || `<p class="sub">視聴ページを開いている端末はありません</p>`;
+  const ev = serverEvents.slice(-40).reverse().map((e) =>
+    `${e.t.slice(11, 19)} [${e.kind}] ${e.text}${e.data !== undefined ? " " + JSON.stringify(e.data) : ""}`).join("\n");
+  $("devPanel").innerHTML = `
+    <h3>取り込みの上限</h3>${table(capRows)}
+    <h3>端末ごと（2秒ごとに更新）</h3>${peersHtml}
+    <h3>出来事（新しい順）</h3><pre>${esc(ev || "まだありません")}</pre>
+    <p class="sub">サーバーの状態は <a href="/api/debug" target="_blank">/api/debug</a>、受信状況の記録は <a href="/api/stats" target="_blank">/api/stats</a></p>`;
+}
+
+function render() {
+  const live = !!stream;
+  $("dot").className = "dot" + (live ? " live" : "");
+  $("state").textContent = live ? "配信中" : "停止中";
+  $("stopBtn").disabled = !live;
+  const connected = [...peers.values()].filter((pc) => pc.connectionState === "connected").length;
+  $("viewerCount").textContent = viewers.size
+    ? `視聴ページを開いている端末 ${viewers.size}台` + (live ? `（映像が届いているのは ${connected}台）` : "")
+    : "視聴ページを開いている端末はありません";
+  const labels = { new: "準備中", connecting: "接続中", connected: "視聴中", disconnected: "途切れています", failed: "つながりませんでした", closed: "終了" };
+  const limits = { bandwidth: "通信量の見積もりに合わせてフレームレートを抑えています。つないだ直後は数秒で戻ります", cpu: "PCの処理が追いつかず画質を下げています" };
+  $("peers").innerHTML = live ? [...viewers].map((id) => {
+    const st = peers.get(id)?.connectionState;
+    const info = peerInfo.get(id);
+    let detail = "";
+    if (st === "connected" && info?.w) {
+      detail = ` ${info.w}×${info.h} ${Math.round(info.fps ?? 0)}fps` + (info.mbps != null ? ` ${info.mbps.toFixed(1)}Mbps` : "");
+      if (limits[info.limit]) detail += `（${limits[info.limit]}）`;
+    }
+    return `<li>${id}: ${labels[st] ?? "待機中"}${detail}</li>`;
+  }).join("") : "";
+  renderLive();
+}
+
+function renderLive() {
+  if (!stream) { $("live").innerHTML = ""; $("muteNote").textContent = ""; return; }
+  const v = stream.getVideoTracks()[0]?.getSettings() ?? {};
+  const a = stream.getAudioTracks()[0]?.getSettings();
+  const fps = Number($("fps").value);
+  const cur = sourceSize ?? (v.width ? { width: v.width, height: v.height } : null);
+  const size = (cur ? `${cur.width}×${cur.height}` : "—") + (lockedSize ? `（上限 ${lockedSize.width}×${lockedSize.height}）` : "");
+  const rows = [
+    ["映像", `${size}　${fps}fpsまで` + (sourceFps != null ? `（取り込み ${Math.round(sourceFps)}fps）` : "")],
+    ["画質の上限", `${Number($("bitrate").value) / 1e6}Mbps`],
+    ["音", a ? (a.channelCount === 2 ? "ステレオ" : `${a.channelCount ?? "?"}ch`) : "なし"],
+  ];
+  const isTab = v.displaySurface === "browser";
+  if (isTab && a && "suppressLocalAudioPlayback" in a) {
+    rows.push(["PCでのタブの音", a.suppressLocalAudioPlayback ? "鳴らさない" : "鳴らす"]);
+    $("muteNote").textContent = a.suppressLocalAudioPlayback !== $("muteLocal").checked
+      ? "PCでタブの音を鳴らすかどうかは、共有し直すと反映されます" : "";
+  } else {
+    $("muteNote").textContent = "";
+  }
+  $("live").innerHTML = rows.map(([k, val]) => `<dt>${k}</dt><dd>${val}</dd>`).join("");
+}
+
+fetch("/api/info").then((r) => r.json()).then(({ urls }) => {
+  $("urls").innerHTML = urls.length
+    ? urls.map((u) => `<div class="url">${u.qr}<code>${u.url}</code></div>`).join("")
+    : `<span class="sub">LANのIPアドレスが見つかりませんでした。Wi-Fiか有線LANにつながっているか確認してください。</span>`;
+});
+
+connect();
+render();
+</script>
+</body>
+</html>
