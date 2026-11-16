@@ -1,2 +1,6 @@
 node_modules/
 dist/
+promo/out/
+promo/public/fonts/NotoSansJP.ttf
+promo/public/shots/
+promo/src/shots.json

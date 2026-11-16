@@ -1,0 +1,27 @@
+{
+  "name": "vanishment-this-wall-promo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "fonts": "curl -fsSL -o public/fonts/NotoSansJP.ttf \"https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf\"",
+    "capture": "bun capture/capture.ts",
+    "studio": "GALLIUM_DRIVER=d3d12 remotion studio",
+    "render": "GALLIUM_DRIVER=d3d12 remotion render Promo out/promo.mp4"
+  },
+  "dependencies": {
+    "@remotion/bundler": "4.0.540",
+    "@remotion/cli": "4.0.540",
+    "@remotion/renderer": "4.0.540",
+    "qrcode": "1.5.4",
+    "react": "19.2.0",
+    "react-dom": "19.2.0",
+    "remotion": "4.0.540"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.1",
+    "@types/qrcode": "1.5.6",
+    "@types/react": "19.2.2",
+    "playwright-core": "1.65.1",
+    "typescript": "5.9.3"
+  }
+}
