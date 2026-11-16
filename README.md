@@ -5,8 +5,8 @@
 
 ## 使い方
 
-1. `bun run build` で `dist/vanish.exe` を作る
-2. `dist/vanish.exe` を Windows 側の好きな場所にコピーしてダブルクリックする
+1. GitHub Actions の build ワークフローの実行結果から `vanish-windows-x64` をダウンロードする（手元で作るなら `bun run build:windows` で `dist/vanish.exe` ができる）
+2. zip の中の `vanish.exe` を Windows 側の好きな場所にコピーしてダブルクリックする
 3. Windows ファイアウォールの確認が出たら「プライベート ネットワーク」を許可する
 4. 自動で開く配信ページ（`http://localhost:47800/send`）で「画面・タブを選んで配信」を押す
 5. 共有するものを選ぶ画面で、音声共有のスイッチをオンにする
@@ -17,6 +17,7 @@
 ## 開発
 
 - `bun run dev` … WSL 上でサーバーを起動（ブラウザは開かない）
+- `bun run build` … Windows 版 `dist/vanish.exe` と Linux 版 `dist/vanish` を作る。Linux 版はブラウザを自動で開かないので、出てきた配信ページの URL を開く
 - `bun test/e2e.ts` … ヘッドレス Chromium で送信・視聴・停止・再接続を確かめる
 
 ## 気をつけること
