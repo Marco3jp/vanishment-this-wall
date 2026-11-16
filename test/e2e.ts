@@ -217,6 +217,23 @@ try {
   check("× で視聴ページの数字を隠せる", !(await viewer1.locator("#dev").evaluate((e) => e.classList.contains("show"))));
   await sender2.uncheck("#devToggle");
 
+  // 開発用モードをオンにしたまま閉じた配信ページを開き直しても、エラーなく動く
+  const devCtx = await browser.newContext();
+  await devCtx.addInitScript(() => localStorage.setItem("screencast.dev", "1"));
+  const devPage = await devCtx.newPage();
+  const devErrors: string[] = [];
+  devPage.on("pageerror", (e) => devErrors.push(e.message));
+  await devPage.goto(`${base}/send`);
+  await devPage.waitForTimeout(1500);
+  const devQr = await devPage.locator("#urls svg").count();
+  const devConnected = !!(await (await fetch(`${base}/api/debug`)).json()).sender;
+  check("開発用モードを保存したまま開き直しても配信ページが動く", devErrors.length === 0 && devQr > 0 && devConnected && (await devPage.locator("#devToggle").isChecked()),
+    JSON.stringify({ devErrors, devQr, devConnected }));
+  await devCtx.close();
+  // 配信ページを閉じたので、元の配信ページを開き直す
+  await sender2.reload();
+  await sender2.click("#testBtn");
+
   const intruder = await ctx.newPage();
   await intruder.goto(`http://${lanIp}:${PORT}/send`);
   await intruder.waitForTimeout(800);

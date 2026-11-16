@@ -458,7 +458,6 @@ $("devToggle").onchange = () => {
   setDevUi($("devToggle").checked);
   wsSend({ type: "dev", on: devOn });
 };
-setDevUi(devOn);
 
 setInterval(async () => {
   if (!devOn) return;
@@ -613,6 +612,8 @@ fetch("/api/info").then((r) => r.json()).then(({ urls }) => {
     : `<span class="sub">LANのIPアドレスが見つかりませんでした。Wi-Fiか有線LANにつながっているか確認してください。</span>`;
 });
 
+// 表を描く関数をすべて定義し終えてから、保存してあった開発用モードの設定を反映する
+setDevUi(devOn);
 connect();
 render();
 </script>
