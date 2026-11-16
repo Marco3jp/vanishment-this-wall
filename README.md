@@ -5,8 +5,8 @@
 
 ## 使い方
 
-1. GitHub Actions の build ワークフローの実行結果から `vanish-windows-x64` をダウンロードする（手元で作るなら `bun run build:windows` で `dist/vanish.exe` ができる）
-2. zip の中の `vanish.exe` を Windows 側の好きな場所にコピーしてダブルクリックする
+1. [Releases の Latest](https://github.com/Marco3jp/vanishment-this-wall/releases/latest) から `vanish.exe` をダウンロードする（main に push するたびに作り直される。手元で作るなら `bun run build:windows` で `dist/vanish.exe` ができる）
+2. `vanish.exe` を Windows 側の好きな場所に置いてダブルクリックする
 3. Windows ファイアウォールの確認が出たら「プライベート ネットワーク」を許可する
 4. 自動で開く配信ページ（`http://localhost:47800/send`）で「画面・タブを選んで配信」を押す
 5. 共有するものを選ぶ画面で、音声共有のスイッチをオンにする
