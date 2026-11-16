@@ -101,14 +101,19 @@ try {
 
   await sender.click("#startBtn");
   check("画面共有（getDisplayMedia）で再開すると届く", await waitVideo(viewer1));
+  await sender.waitForFunction(() => {
+    const v = ((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0];
+    return v.getSettings().width === (v.getConstraints().width as any)?.exact;
+  }, null, { timeout: 5000 }).catch(() => {});
   const locked = await sender.evaluate(() => {
     const tr = (document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream;
     const v = tr.getVideoTracks()[0];
     return { settings: v.getSettings(), constraints: v.getConstraints() };
   });
   const cw = (locked.constraints.width as any)?.exact, ch = (locked.constraints.height as any)?.exact;
-  // ヘッドレスの視聴ページの画面は 1280x720 なので、上限も 1280x720 になる
-  check("取り込みの上限が視聴端末の画面に合わせて決まる", cw === 1280 && ch === 720 && locked.settings.width === cw && locked.settings.height === ch,
+  // ヘッドレスの視聴ページの画面は 1280x720。上限は描き直しの余裕を見て 8/7 倍の 1462x822 になる
+  // 偽の画面は取り込みを始め直すと上限を超えたサイズを出すことがあるので、上限の設定値だけを見る
+  check("取り込みの上限が視聴端末の画面に合わせて決まる", cw === 1462 && ch === 822,
     `${locked.settings.width}x${locked.settings.height} 上限=${cw}x${ch}`);
   await sender.selectOption("#fps", "60");
   await sender.waitForTimeout(300);
@@ -126,8 +131,9 @@ try {
   }
   check("取り込んだ時点のサイズが変わらない", sizes.size === 1 && sizes.has(`${cw}x${ch}`), [...sizes].join(", "));
   // 視聴側の解像度は帯域の見積もりが上がるまで数秒かけて上がる
-  const reached = await viewer1.waitForFunction((w) => document.querySelector("video")!.videoWidth === w, cw, { timeout: 20000 }).then(() => true, () => false);
-  check("視聴側にも上限のサイズで届く", reached, await viewer1.evaluate(() => `${document.querySelector("video")!.videoWidth}x${document.querySelector("video")!.videoHeight}`));
+  // 送るときに端末の画面（1280x720）まで縮める
+  const reached = await viewer1.waitForFunction(() => Math.abs(document.querySelector("video")!.videoWidth - 1280) <= 4, null, { timeout: 20000 }).then(() => true, () => false);
+  check("視聴側には端末の画面に合わせて縮めて届く", reached, await viewer1.evaluate(() => `${document.querySelector("video")!.videoWidth}x${document.querySelector("video")!.videoHeight}`));
 
   // 短辺 1220px・長辺 2712px の端末がつなぐと、上限がその画面に合わせて上がる
   const bigCtx = await browser.newContext({ viewport: { width: 400, height: 860 }, screen: { width: 610, height: 1356 }, deviceScaleFactor: 2 });
@@ -135,32 +141,48 @@ try {
   await big.goto(`http://${lanIp}:${PORT}/`);
   const grown = await sender.waitForFunction(() => {
     const v = ((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0];
-    return (v.getConstraints().height as any)?.exact === 1220;
+    return (v.getConstraints().height as any)?.exact === 1394;
   }, null, { timeout: 8000 }).then(() => true, () => false);
   const capNow = await sender.evaluate(() => {
     const v = ((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0];
     const c: any = v.getConstraints();
     return { cap: `${c.width?.exact}x${c.height?.exact}`, live: document.querySelector("#live")!.textContent };
   });
-  check("大きい画面の端末がつなぐと上限が上がる", grown && capNow.cap === "2168x1220" && capNow.live!.includes("上限 2168×1220"), JSON.stringify(capNow));
+  check("大きい画面の端末がつなぐと上限が上がる", grown && capNow.cap === "2478x1394" && capNow.live!.includes("上限 2478×1394"), JSON.stringify(capNow));
+  // 端末ごとに送る最大サイズが決まる（大きい端末は画面の 2712x1220、ほかは 1280x720）
+  const scales = await sender.waitForFunction(() => {
+    // @ts-ignore 送信ページの peerScale を直接見る
+    const all = [...peerScale.values()].map((x: any) => `${x.target.width}x${x.target.height}`);
+    return all.includes("2712x1220") && all.filter((x) => x === "1280x720").length === 2 ? all : null;
+  }, null, { timeout: 8000 }).then((h) => h.jsonValue(), () => null);
+  check("端末ごとに画面に合わせて送る最大サイズが決まる", !!scales, JSON.stringify(scales));
+  // 届くサイズが 2712x1220 に収まり続けるか、3 秒間見る（取り込みを始め直した直後も含む）
+  const bigSizes = await big.evaluate(async () => {
+    const v = document.querySelector("video")!; const seen = new Set<string>();
+    for (let i = 0; i < 30; i++) { if (v.videoWidth) seen.add(`${v.videoWidth}x${v.videoHeight}`); await new Promise((r) => setTimeout(r, 100)); }
+    return [...seen];
+  });
+  check("大きい画面の端末にも画面に収まるサイズで届く", bigSizes.length > 0 && bigSizes.every((s) => { const [w, h] = s.split("x").map(Number); return w <= 2712 && h <= 1220; }), bigSizes.join(", "));
+  const smallSizes = await viewer1.evaluate(() => `${document.querySelector("video")!.videoWidth}x${document.querySelector("video")!.videoHeight}`);
+  check("小さい画面の端末には縮めて届く", (() => { const [w, h] = smallSizes.split("x").map(Number); return w <= 1280 && h <= 720; })(), smallSizes);
   await sender.selectOption("#res", "720");
   await sender.waitForTimeout(500);
   const cap720 = await sender.evaluate(() => (((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0].getConstraints() as any).height?.exact);
-  check("「720pまで」を選ぶと上限が720になる", cap720 === 720, String(cap720));
+  check("「720pまで」を選ぶと上限が 720 の 8/7 倍になる", cap720 === 822, String(cap720));
   await sender.selectOption("#res", "auto");
   await sender.waitForTimeout(500);
   const capOf = () => sender.evaluate(() => {
     const c: any = ((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0].getConstraints();
     return `${c.width?.exact}x${c.height?.exact}`;
   });
-  check("「視聴端末に合わせる」に戻すと上限も戻る", (await capOf()) === "2168x1220", await capOf());
+  check("「視聴端末に合わせる」に戻すと上限も戻る", (await capOf()) === "2478x1394", await capOf());
   // 大きい画面の端末が抜けると、10秒待ってから残りの端末に合わせて下げる
   await bigCtx.close();
   await sender.waitForTimeout(4000);
-  check("大きい画面の端末が抜けた直後は上限を下げない", (await capOf()) === "2168x1220", await capOf());
+  check("大きい画面の端末が抜けた直後は上限を下げない", (await capOf()) === "2478x1394", await capOf());
   const shrunk = await sender.waitForFunction(() => {
     const c: any = ((document.querySelector("#preview") as HTMLVideoElement).srcObject as MediaStream).getVideoTracks()[0].getConstraints();
-    return c.height?.exact === 720;
+    return c.height?.exact === 822;
   }, null, { timeout: 12000 }).then(() => true, () => false);
   check("10秒たつと残りの端末に合わせて上限を下げる", shrunk, await capOf());
 

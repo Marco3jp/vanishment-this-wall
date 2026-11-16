@@ -181,6 +181,7 @@ async function handle(msg) {
   } else if (msg.type === "viewer-screen") {
     viewerScreens.set(msg.id, msg.screen);
     await updateResolutionCap();
+    if (peers.has(msg.id)) await applyPeerScale(msg.id, peers.get(msg.id));
   } else if (msg.type === "viewer-leave") {
     viewers.delete(msg.id);
     viewerScreens.delete(msg.id);
@@ -210,6 +211,7 @@ async function startPeer(id) {
   await pc.setLocalDescription(await pc.createOffer());
   wsSend({ type: "signal", to: id, data: { sdp: pc.localDescription.toJSON() } });
   await applyEncoding(pc);
+  await applyPeerScale(id, pc);
 }
 
 async function applyEncoding(pc) {
@@ -249,7 +251,8 @@ async function startStream(newStream) {
 // 取り込むサイズの上限を決める。Chrome の画面共有は getDisplayMedia に min/exact を渡せず、
 // applyConstraints でも上限しか変わらないので、解像度は固定できない。実際の大きさは、元のタブを一定の刻みで縮めた候補のうち上限以下で最大のものになる。
 // 上限は、つないでいる端末のうち一番大きい画面に、共有を始めた時点の縦横比で収まるサイズにする。
-// 共有直後の getSettings() は 432x216 のような縮んだサイズを返すことがあるので、縦横比だけを使う
+// 共有直後の getSettings() は 432x216 のような縮んだサイズや、実際とは違う縦横比を返すことがある。
+// 大きさは使わず縦横比だけを使い、取り込みが始まったら実際の大きさの縦横比に直す（fixAspectFromSource）
 function capBox() {
   const mode = $("res").value;
   if (mode === "720") return { w: 1280, h: 720 };
@@ -282,12 +285,25 @@ async function lockResolution(track) {
   await applyCap(track);
 }
 
+const even = (n) => Math.max(2, Math.round(n / 2) * 2);
+// 縦横比 aspect の映像が box に収まる最大のサイズ
+function fitBox(aspect, box) {
+  const h = Math.min(box.w / aspect, box.h);
+  return { width: even(h * aspect), height: even(h) };
+}
+
+// タブの中身が上限より小さいと、Chrome はタブを 1.25〜2 倍（0.25 刻み）で描き直して取り込む。
+// ただし差が上限の 1/8 以内なら描き直さない。
+// 上限をほしいサイズの 8/7 倍にしておくと、中身がほしいサイズより小さいときは必ず描き直され、ほしいサイズ以上で取り込める。
+// 端末ごとの大きさへは、送るときに縮める（applyPeerScale）
+const HIDPI_HEADROOM = 8 / 7;
+
 async function applyCap(track, allowShrink = true) {
   const box = capBox() ?? (lockedSize ? null : { w: 1920, h: 1080 });
   if (!box) return;
-  const scale = Math.min(box.w / lockAspect, box.h);
-  const even = (n) => Math.max(2, Math.round(n / 2) * 2);
-  const next = { width: even(scale * lockAspect), height: even(scale) };
+  const want = fitBox(lockAspect, box);
+  const k = Math.min(HIDPI_HEADROOM, 3840 / want.width, 2160 / want.height);
+  const next = { width: even(want.width * k), height: even(want.height * k) };
   if (lockedSize && next.width === lockedSize.width && next.height === lockedSize.height) return;
   if (lockedSize && !allowShrink && next.width * next.height < lockedSize.width * lockedSize.height) {
     shrinkTimer ??= setTimeout(() => {
@@ -300,11 +316,70 @@ async function applyCap(track, allowShrink = true) {
   shrinkTimer = null;
   const prev = lockedSize;
   lockedSize = next;
-  const why = { mode: $("res").value, aspect: lockAspect, box, screens: Object.fromEntries(viewerScreens) };
+  const why = { mode: $("res").value, aspect: lockAspect, box, want, screens: Object.fromEntries(viewerScreens) };
   await track.applyConstraints(videoConstraints()).then(
     () => devEvent("cap", `取り込みの上限を ${next.width}×${next.height} にしました（前: ${prev ? `${prev.width}×${prev.height}` : "なし"}）`, why),
     (e) => { console.warn(e); lockedSize = prev; devEvent("cap", `取り込みの上限を ${next.width}×${next.height} にできませんでした: ${e.message}`, why); });
   render();
+}
+
+// 端末ごとに、その画面に収まるサイズまで縮めて送る。取り込みは一番大きい端末に合わせているので、小さい端末にはそのまま送ると重い
+const peerScale = new Map(); // id -> { scale, target }
+function viewerBox(id) {
+  const mode = $("res").value;
+  const modeBox = mode === "720" ? { w: 1280, h: 720 } : mode === "1080" ? { w: 1920, h: 1080 } : { w: 3840, h: 2160 };
+  const sc = viewerScreens.get(id);
+  if (!sc) return mode === "auto" ? { w: 1920, h: 1080 } : modeBox;
+  return { w: Math.min(sc.long, modeBox.w), h: Math.min(sc.short, modeBox.h) };
+}
+
+// 送る最大サイズを scaleResolutionDownTo で指定する。元の大きさが変わっても、取り込みを始め直した直後でも端末の画面に収まる。
+// 使えないブラウザでは、取り込みの大きさから倍率を計算して scaleResolutionDownBy で縮める
+let downToSupported = null;
+async function applyPeerScale(id, pc) {
+  const s = pc.getSenders().find((x) => x.track?.kind === "video");
+  if (!s) return;
+  const box = viewerBox(id);
+  if (downToSupported !== false) {
+    const p = s.getParameters();
+    if (!p.encodings?.length) return;
+    const cur = p.encodings[0].scaleResolutionDownTo;
+    if (cur?.maxWidth === box.w && cur?.maxHeight === box.h) return;
+    p.encodings[0].scaleResolutionDownTo = { maxWidth: box.w, maxHeight: box.h };
+    try {
+      await s.setParameters(p);
+      downToSupported = s.getParameters().encodings[0].scaleResolutionDownTo?.maxWidth === box.w;
+    } catch { downToSupported = false; }
+    if (downToSupported) {
+      peerScale.set(id, { target: { width: box.w, height: box.h } });
+      devEvent("scale", `視聴端末 ${id} へは ${box.w}×${box.h} に収まるように縮めて送ります`);
+      return;
+    }
+  }
+  if (!sourceSize) return;
+  const target = fitBox(sourceSize.width / sourceSize.height, box);
+  const scale = Math.max(1, sourceSize.width / target.width, sourceSize.height / target.height);
+  const prev = peerScale.get(id);
+  peerScale.set(id, { scale, target });
+  const p = s.getParameters();
+  if (!p.encodings?.length) return;
+  const cur = p.encodings[0].scaleResolutionDownBy ?? 1;
+  if (Math.abs(cur - scale) < 0.01) return;
+  p.encodings[0].scaleResolutionDownBy = scale;
+  await s.setParameters(p).then(
+    () => { if (!prev || Math.abs(prev.scale - scale) >= 0.01) devEvent("scale", `視聴端末 ${id} へは ${sourceSize.width}×${sourceSize.height} を 1/${scale.toFixed(3)} にして送ります（${target.width}×${target.height}）`); },
+    (e) => devEvent("scale", `視聴端末 ${id} の縮小を設定できませんでした: ${e.message}`),
+  );
+}
+
+// 縦横比がずれていると、上限の 8/7 倍の余裕が足りず、描き直しが小さい倍率で止まる
+function fixAspectFromSource() {
+  if (!sourceSize || !lockAspect) return;
+  const a = sourceSize.width / sourceSize.height;
+  if (Math.abs(a - lockAspect) / lockAspect <= 0.02) return;
+  devEvent("cap", `縦横比を ${lockAspect.toFixed(3)} から ${a.toFixed(3)} に直しました（取り込み ${sourceSize.width}×${sourceSize.height}）`);
+  lockAspect = a;
+  queue = queue.then(() => updateResolutionCap(true)).catch(console.error);
 }
 
 async function updateResolutionCap(allowShrink = false) {
@@ -349,7 +424,12 @@ $("startBtn").onclick = async () => {
 };
 
 $("stopBtn").onclick = () => stopStream(true);
-$("res").onchange = () => { queue = queue.then(() => updateResolutionCap(true)).catch(console.error); };
+$("res").onchange = () => {
+  queue = queue.then(async () => {
+    await updateResolutionCap(true);
+    for (const [id, pc] of peers) await applyPeerScale(id, pc);
+  }).catch(console.error);
+};
 $("muteLocal").onchange = renderLive;
 $("bitrate").onchange = () => { for (const pc of peers.values()) applyEncoding(pc); render(); };
 $("fps").onchange = () => {
@@ -427,6 +507,9 @@ setInterval(async () => {
     sourceFps ??= ms?.framesPerSecond ?? null;
     if (ms?.width) sourceSize = { width: ms.width, height: ms.height };
   }
+  fixAspectFromSource();
+  for (const [id, pc] of peers) await applyPeerScale(id, pc);
+  for (const id of [...peerScale.keys()]) if (!peers.has(id)) peerScale.delete(id);
   for (const id of [...peerInfo.keys()]) if (!peers.has(id)) peerInfo.delete(id);
   for (const id of [...peerRaw.keys()]) if (!peers.has(id)) peerRaw.delete(id);
   data.cap = { mode: $("res").value, aspect: lockAspect, lockedSize, box: lockAspect ? capBox() : null, screens: Object.fromEntries(viewerScreens), sourceSize };
@@ -493,7 +576,7 @@ function senderRows(id) {
     ["コーデック", `${esc(codec?.mimeType)} ${esc(codec?.sdpFmtpLine ?? "")}`],
     ["エンコーダー", `${esc(v?.encoderImplementation)}${v?.powerEfficientEncoder ? "（ハードウェア）" : ""}`],
     ["取り込み", `${esc(ms?.width)}×${esc(ms?.height)} ${num(ms?.framesPerSecond)}fps`],
-    ["送信", `${esc(v?.frameWidth)}×${esc(v?.frameHeight)} ${num(v?.framesPerSecond)}fps`],
+    ["送信", `${esc(v?.frameWidth)}×${esc(v?.frameHeight)} ${num(v?.framesPerSecond)}fps　この端末向けの最大 ${(() => { const x = peerScale.get(id); return x ? `${x.target.width}×${x.target.height}${x.scale ? `（1/${num(x.scale, 3)}）` : ""}` : "—"; })()}`],
     ["ビットレート", `目標 ${num((v?.targetBitrate ?? 0) / 1e6, 1)}Mbps　実際 ${num(rate(v, pv, "bytesSent", sec), 1)}Mbps`],
     ["圧縮", `<span class="${encMs != null && encMs * 1000 > (1000 / Number($("fps").value)) * 0.8 ? "bad" : ""}">${num(encMs == null ? null : encMs * 1000, 1)}ms/フレーム</span>　QP平均 ${num(per(v, pv, "qpSum", "framesEncoded"), 1)}　キーフレーム ${esc(v?.keyFramesEncoded)}`],
     ["制限", `<span class="${v?.qualityLimitationReason && v.qualityLimitationReason !== "none" ? "bad" : ""}">${esc(v?.qualityLimitationReason)}</span>　帯域 ${num(qd.bandwidth)}s・CPU ${num(qd.cpu)}s　解像度の変更 ${esc(v?.qualityLimitationResolutionChanges)}回`],
@@ -540,7 +623,7 @@ function renderDev() {
     ["解像度の設定", esc($("res").selectedOptions[0]?.textContent)],
     ["縦横比", lockAspect ? num(lockAspect, 3) : "—（共有していない）"],
     ["端末の画面", viewerScreens.size ? [...viewerScreens].map(([id, sc]) => `${id}: ${sc.long}×${sc.short}`).join("　") : "—"],
-    ["計算した枠", (() => { const b = lockAspect ? capBox() : null; return b ? `${b.w}×${b.h}` : "—"; })()],
+    ["計算した枠", (() => { const b = lockAspect ? capBox() : null; return b ? `${b.w}×${b.h}（ほしいサイズ ${fitBox(lockAspect, b).width}×${fitBox(lockAspect, b).height}・描き直しの余裕 ×8/7）` : "—"; })()],
     ["上限", lockedSize ? `${lockedSize.width}×${lockedSize.height}` : "—"],
     ["取り込み中", sourceSize ? `${sourceSize.width}×${sourceSize.height}` : "—"],
     // 取り込みは共有元の実際のピクセル数より大きくならない。共有元がこのページと同じ画面にあれば目安になる
